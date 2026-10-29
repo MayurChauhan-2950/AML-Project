@@ -12,7 +12,7 @@ const CLASS_META = {
   notumor: { label: 'No Tumor', color: '#16A34A' },
   pituitary: { label: 'Pituitary Tumor', color: '#7C3AED' },
 }
-const MODEL_COLORS = ['#2563EB', '#0B1220']
+const MODEL_COLORS = ['#2563EB', '#94A3B8']
 
 // Shown only when the API returns no model metrics. Known results from the project notebook (accuracy only).
 const FALLBACK_MODELS = [
@@ -55,7 +55,7 @@ function useDashboardData() {
   const [state, setState] = useState({ loading: true, error: null, stats: null, recent: [], models: [] })
   useEffect(() => {
     let active = true
-    Promise.all([getStats(), listAnalyses({ page: 1, pageSize: 5 }), getModels().catch(() => null)])
+    Promise.all([getStats(), listAnalyses({ page: 1, page_size: 5 }), getModels().catch(() => null)])
       .then(([stats, list, models]) => {
         if (active) setState({ loading: false, error: null, stats, recent: list?.items ?? [], models: normalizeModels(models) })
       })

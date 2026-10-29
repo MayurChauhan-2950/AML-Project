@@ -4,7 +4,9 @@ import './analysis.css'
 import { CLASS_LABELS, CLASS_TONES } from '../../lib/classes.js'
 
 export default function ClassBadge({ cls, label, large = false }) {
-  const [background, color] = CLASS_TONES[cls] || ['#E2E8F0', '#334155']
+  const known = Boolean(CLASS_TONES[cls])
+  const background = known ? `var(--cls-${cls}-bg)` : 'var(--color-surface-2)'
+  const color = known ? `var(--cls-${cls}-text)` : 'var(--color-text)'
   return (
     <span className={`a-badge${large ? ' a-badge--lg' : ''}`} style={{ background, color }}>
       {label || CLASS_LABELS[cls] || cls}

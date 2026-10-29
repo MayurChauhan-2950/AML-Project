@@ -1,11 +1,12 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, ScanSearch, History, Settings } from 'lucide-react'
+import { LayoutDashboard, ScanSearch, History, Settings, BarChart3 } from 'lucide-react'
 import { Logo } from './Logo.jsx'
 
 const NAV = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/analyze', label: 'New Analysis', icon: ScanSearch },
   { to: '/history', label: 'History', icon: History },
+  { to: '/insights', label: 'Insights', icon: BarChart3 },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 

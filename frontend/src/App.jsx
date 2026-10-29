@@ -6,6 +6,8 @@ import Results from './pages/Results.jsx'
 import History from './pages/History.jsx'
 import Report from './pages/Report.jsx'
 import Settings from './pages/Settings.jsx'
+import Insights from './pages/Insights.jsx'
+import Compare from './pages/Compare.jsx'
 
 // Routes are fixed by the lead. Each page is owned by one agent (see docs/API_CONTRACT.md).
 export default function App() {
@@ -18,8 +20,11 @@ export default function App() {
         <Route path="/history" element={<History />} />
         <Route path="/report/:id" element={<Report />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/insights" element={<Insights />} />
+        <Route path="/compare" element={<Compare />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
   )
 }
+

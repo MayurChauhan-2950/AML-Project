@@ -2,12 +2,13 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Check } from 'lucide-react'
 import { Button, Card, Disclaimer, PageHeader } from '../components/ui/index.js'
-import { getPrefs, getProfile, setPrefs, setProfile } from '../layout/prefs.js'
+import { getPrefs, getProfile, getTheme, setPrefs, setProfile, setTheme } from '../layout/prefs.js'
 
 export default function Settings() {
   const [name, setName] = useState(() => (getProfile() === 'Guest' ? '' : getProfile()))
   const [prefs, setLocalPrefs] = useState(getPrefs)
   const [saved, setSaved] = useState(false)
+  const [theme, setThemeState] = useState(getTheme)
 
   const update = (partial) => {
     setLocalPrefs(setPrefs(partial))
@@ -42,6 +43,17 @@ export default function Settings() {
           </div>
           <div><Button type="submit">Save name</Button></div>
         </form>
+      </Card>
+
+      <Card title="Appearance" subtitle="Choose a light or dark theme, or follow your device setting.">
+        <div className="stack" style={{ maxWidth: 420, gap: '0.35rem' }}>
+          <label htmlFor="theme-select">Theme</label>
+          <select id="theme-select" value={theme} onChange={(e) => { setTheme(e.target.value); setThemeState(e.target.value); flash() }}>
+            <option value="system">Match system</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
       </Card>
 
       <Card title="Analysis defaults" subtitle="Used as the starting options on the New Analysis page.">

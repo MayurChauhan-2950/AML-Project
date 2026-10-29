@@ -68,3 +68,23 @@ export function useProfile() {
   }, [])
   return name
 }
+
+const THEME_KEY = 'brainscan.theme'
+
+/** Saved theme choice: 'system' (default), 'light' or 'dark'. */
+export function getTheme() {
+  const value = read(THEME_KEY)
+  return value === 'light' || value === 'dark' ? value : 'system'
+}
+
+/** Applies a theme to <html>: 'system' removes the attribute so the OS preference applies. */
+export function applyTheme(theme = getTheme()) {
+  const root = document.documentElement
+  if (theme === 'light' || theme === 'dark') root.setAttribute('data-theme', theme)
+  else root.removeAttribute('data-theme')
+}
+
+export function setTheme(theme) {
+  write(THEME_KEY, theme)
+  applyTheme(theme)
+}
