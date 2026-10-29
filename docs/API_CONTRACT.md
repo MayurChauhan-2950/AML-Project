@@ -54,3 +54,56 @@ Errors: JSON `{"detail": "human readable message"}` with proper status codes (40
 - `frontend/src/styles/tokens.css`, `frontend/src/App.jsx`, `frontend/src/main.jsx`, `frontend/package.json`, `frontend/vite.config.js`, `docs/**`: set by the lead; agents ask before changing (add dependencies with `npm install <pkg>` only if truly needed and say so in the final report).
 - Nobody edits `Brain_Tumor_Classification_AML.ipynb`, `*.keras`, `model_comparison_results.csv`.
 - Nobody runs `git add/commit/push/checkout`; read-only git commands only.
+
+
+---
+
+# Contract v1.1 additions (lead-defined; backend implements exactly this, the frontend codes against it)
+
+## Analysis object: new fields
+```json
+{
+  "low_confidence": false,
+  "confidence_threshold": 0.6,
+  "top2": [{"class": "glioma", "label": "Glioma", "probability": 0.91}, {"class": "meningioma", "label": "Meningioma", "probability": 0.05}],
+  "entropy": 0.41,
+  "model_id": "resnet50",
+  "comparison": null
+}
+```
+- `low_confidence` is true when the highest probability is below `confidence_threshold` (default 0.6, env `CONFIDENCE_THRESHOLD`). The UI then shows an "Uncertain result" state instead of a confident class.
+- `entropy` is the Shannon entropy of the probabilities in nats (0 = certain, ln 4 = 1.386 = maximally uncertain).
+- Record ids are unguessable: `secrets.token_urlsafe(16)` (22 URL-safe characters); the frontend must treat ids as opaque strings.
+
+## POST /api/analyze: `model=both`
+`model=resnet50|custom_cnn|both`. With `both`, the main fields describe ResNet50 and `comparison` is
+`{"resnet50": {predicted_class, confidence, probabilities}, "custom_cnn": {...}, "agree": true}`; otherwise `comparison` is null.
+
+## GET /api/health (extended)
+`{"status":"ok","model_loaded":true,"model_version":"resnet50-v1","classes":[...],"models":{"resnet50":{"available":true,"loaded":false},"custom_cnn":{"available":true,"loaded":false}},"tensorflow_available":true,"demo":false}`
+`model_loaded` means at least one model is loaded in memory; `available` means the file exists and TensorFlow can be imported.
+
+## GET /api/models/insights
+Returns the verified evaluation numbers from `ml/results/model_insights.json` (written by the ML agent from the notebook's real outputs). If that file is missing, return `{"status":"unavailable","models":[]}` with HTTP 200. Shape:
+```json
+{
+  "status": "verified_from_notebook_outputs",
+  "source": "Brain_Tumor_Classification_AML.ipynb, cell 28",
+  "dataset": {"train_images": 5600, "test_images": 1600, "classes": ["glioma","meningioma","notumor","pituitary"], "image_size": [224,224]},
+  "models": [{
+    "id": "resnet50", "name": "ResNet50 (transfer learning, frozen backbone)",
+    "accuracy": 0.9, "macro_precision": 0.9061, "macro_recall": 0.9, "macro_f1": 0.8975,
+    "total_params": 23851012, "trainable_params": 263044,
+    "per_class": [{"class":"glioma","precision":0.95,"recall":0.71,"f1":0.81,"support":400}],
+    "confusion_matrix": [[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]],
+    "notes": ["..."]
+  }]
+}
+```
+Fields that cannot be verified from the notebook outputs must be `null`, never guessed. Rows of `confusion_matrix` = true class, columns = predicted class, in the class order above.
+
+## Other
+- `GET /api/analyses` still uses `page_size` (snake_case). The frontend must send exactly `page_size`.
+- `DELETE /api/analyses` (purge all) requires query `confirm=true`.
+- Retention: env `RETENTION_DAYS` (default 0 = keep) with a purge at startup.
+- Frontend routes added by the lead: `/insights` (model performance and how-it-works) and `/compare?a=<id>&b=<id>` (side-by-side of two saved analyses).
