@@ -1,6 +1,10 @@
 """API tests using a fake model service. Run with ``pytest`` from backend/."""
 from __future__ import annotations
 
+import json
+import math
+import re
+
 from app import config
 from app.preprocess import sanitize_filename
 
@@ -12,6 +16,10 @@ def test_health(client):
     assert body["status"] == "ok"
     assert body["model_loaded"] is False
     assert body["classes"] == ["glioma", "meningioma", "notumor", "pituitary"]
+    assert set(body["models"]) == {"resnet50", "custom_cnn"}
+    assert set(body["models"]["resnet50"]) == {"available", "loaded"}
+    assert isinstance(body["tensorflow_available"], bool)
+    assert body["demo"] is False
 
 
 def test_models_reads_csv(client):
@@ -179,3 +187,148 @@ def test_sanitize_filename():
     assert sanitize_filename("C:\\Users\\me\\scan 1.png") == "scan 1.png"
     assert sanitize_filename("") == "upload"
     assert len(sanitize_filename("a" * 500 + ".png")) <= 100
+
+
+# -- contract v1.1 ----------------------------------------------------------
+def test_safety_fields_confident(client, png_bytes):
+    body = upload(client, png_bytes).json()
+    assert body["low_confidence"] is False
+    assert body["confidence_threshold"] == config.CONFIDENCE_THRESHOLD
+    assert [t["class"] for t in body["top2"]] == ["meningioma", "notumor"]
+    assert body["top2"][0]["label"] == "Meningioma"
+    expected = -sum(p * math.log(p) for p in [0.05, 0.85, 0.06, 0.04])
+    assert abs(body["entropy"] - expected) < 1e-3
+    assert body["model_id"] == "resnet50"
+    assert body["comparison"] is None
+
+
+def test_low_confidence_flag(client, fake_service, png_bytes):
+    fake_service.probs = [0.3, 0.3, 0.2, 0.2]
+    body = upload(client, png_bytes).json()
+    assert body["low_confidence"] is True
+
+
+def test_threshold_from_config(client, fake_service, png_bytes, monkeypatch):
+    monkeypatch.setattr(config, "CONFIDENCE_THRESHOLD", 0.9)
+    body = upload(client, png_bytes).json()  # top probability 0.85 < 0.9
+    assert body["low_confidence"] is True and body["confidence_threshold"] == 0.9
+
+
+def test_entropy_bounds(client, fake_service, png_bytes):
+    fake_service.probs = [0.25, 0.25, 0.25, 0.25]
+    assert abs(upload(client, png_bytes).json()["entropy"] - math.log(4)) < 1e-3
+    fake_service.probs = [1.0, 0.0, 0.0, 0.0]
+    assert upload(client, png_bytes).json()["entropy"] == 0
+
+
+def test_analyze_both_models(client, fake_service, png_bytes):
+    fake_service.probs_by_model = {
+        "resnet50": [0.05, 0.85, 0.06, 0.04],
+        "custom_cnn": [0.7, 0.1, 0.1, 0.1],
+    }
+    body = upload(client, png_bytes, model="both").json()
+    assert body["model_id"] == "resnet50" and body["predicted_class"] == "meningioma"
+    comp = body["comparison"]
+    assert comp["resnet50"]["predicted_class"] == "meningioma"
+    assert comp["custom_cnn"]["predicted_class"] == "glioma"
+    assert comp["agree"] is False
+    assert set(comp["custom_cnn"]) == {"predicted_class", "confidence", "probabilities"}
+    # comparison survives a round trip through storage
+    assert client.get(f"/api/analyses/{body['id']}").json()["comparison"] == comp
+
+
+def test_analyze_both_agree(client, png_bytes):
+    assert upload(client, png_bytes, model="both").json()["comparison"]["agree"] is True
+
+
+def test_ids_are_unguessable(client, png_bytes):
+    ids = {upload(client, png_bytes).json()["id"] for _ in range(3)}
+    assert len(ids) == 3
+    assert all(re.fullmatch(r"[A-Za-z0-9_-]{22}", i) for i in ids)
+
+
+def test_list_items_include_safety_fields(client, png_bytes):
+    upload(client, png_bytes)
+    item = client.get("/api/analyses").json()["items"][0]
+    assert {"low_confidence", "top2", "entropy", "model_id"} <= set(item)
+
+
+def test_purge_requires_confirm(client, png_bytes, tmp_path):
+    upload(client, png_bytes)
+    upload(client, png_bytes)
+    assert client.delete("/api/analyses").status_code == 400
+    assert client.delete("/api/analyses", params={"confirm": "false"}).status_code == 400
+    assert client.get("/api/stats").json()["total_scans"] == 2
+    resp = client.delete("/api/analyses", params={"confirm": "true"})
+    assert resp.status_code == 200 and resp.json()["deleted"] == 2
+    assert client.get("/api/stats").json()["total_scans"] == 0
+    assert not list((tmp_path / "data" / "uploads").iterdir())
+
+
+def test_insights_unavailable(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "INSIGHTS_JSON", tmp_path / "missing.json")
+    resp = client.get("/api/models/insights")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "unavailable", "models": []}
+
+
+def test_insights_reads_file(client, monkeypatch, tmp_path):
+    path = tmp_path / "insights.json"
+    payload = {"status": "verified_from_notebook_outputs", "models": [{"id": "resnet50", "accuracy": 0.9}]}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(config, "INSIGHTS_JSON", path)
+    assert client.get("/api/models/insights").json() == payload
+
+
+def test_retention_purge_at_startup(tmp_path, fake_service, png_bytes, monkeypatch):
+    import sqlite3
+
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from app.storage import Storage
+
+    storage = Storage(tmp_path / "data")
+    first = storage.create(
+        filename="old.png", predicted_class="glioma", confidence=0.9,
+        probabilities={"glioma": 0.9, "meningioma": 0.05, "notumor": 0.03, "pituitary": 0.02},
+        model_version="resnet50-v1", model_id="resnet50", image_bytes=png_bytes,
+        image_ext=".png", heatmap_png=None,
+    )
+    storage.create(
+        filename="new.png", predicted_class="glioma", confidence=0.9,
+        probabilities={"glioma": 0.9, "meningioma": 0.05, "notumor": 0.03, "pituitary": 0.02},
+        model_version="resnet50-v1", model_id="resnet50", image_bytes=png_bytes,
+        image_ext=".png", heatmap_png=None,
+    )
+    with sqlite3.connect(storage.db_path) as conn:
+        conn.execute("UPDATE analyses SET created_at = '2000-01-01T00:00:00Z' WHERE id = ?", (first["id"],))
+    monkeypatch.setattr(config, "RETENTION_DAYS", 30)
+    with TestClient(create_app(storage=storage, model_service=fake_service)) as c:
+        body = c.get("/api/analyses").json()
+    assert body["total"] == 1 and body["items"][0]["filename"] == "new.png"
+
+
+def test_legacy_rows_are_upgraded(tmp_path, png_bytes):
+    import sqlite3
+
+    from app.storage import Storage
+
+    data = tmp_path / "data"
+    (data / "uploads").mkdir(parents=True)
+    (data / "heatmaps").mkdir(parents=True)
+    (data / "uploads" / "abcd1234.png").write_bytes(png_bytes)
+    with sqlite3.connect(data / "analyses.db") as conn:
+        conn.execute(
+            "CREATE TABLE analyses (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, filename TEXT NOT NULL,"
+            " predicted_class TEXT NOT NULL, confidence REAL NOT NULL, probabilities TEXT NOT NULL,"
+            " model_version TEXT NOT NULL, image_file TEXT NOT NULL, heatmap_file TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO analyses VALUES ('abcd1234', '2026-01-01T00:00:00Z', 'a.png', 'glioma', 0.5,"
+            " ?, 'resnet50-v1', 'abcd1234.png', NULL)",
+            (json.dumps({"glioma": 0.5, "meningioma": 0.3, "notumor": 0.1, "pituitary": 0.1}),),
+        )
+    rec = Storage(data).get("abcd1234")
+    assert rec is not None and rec["low_confidence"] is True
+    assert rec["model_id"] == "resnet50" and len(rec["top2"]) == 2

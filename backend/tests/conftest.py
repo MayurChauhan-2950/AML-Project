@@ -23,6 +23,7 @@ class FakeModelService:
 
     def __init__(self) -> None:
         self.probs = [0.05, 0.85, 0.06, 0.04]
+        self.probs_by_model: dict[str, list[float]] = {}  # optional per-model override
         self.available = True
         self.heatmap_fails = False
         self.loaded = False
@@ -31,13 +32,19 @@ class FakeModelService:
     def is_loaded(self) -> bool:
         return self.loaded
 
+    def status(self) -> dict[str, dict[str, bool]]:
+        return {m: {"available": self.available, "loaded": self.loaded} for m in ("resnet50", "custom_cnn")}
+
+    def tensorflow_available(self) -> bool:
+        return self.available
+
     def predict(self, array: np.ndarray, model_name: str) -> list[float]:
         if not self.available:
             raise ModelUnavailableError("TensorFlow is not installed.")
         assert array.shape == (224, 224, 3) and array.dtype == np.float32
         self.last_array = array
         self.loaded = True
-        return list(self.probs)
+        return list(self.probs_by_model.get(model_name, self.probs))
 
     def heatmap(self, array: np.ndarray, model_name: str, class_index: int) -> bytes:
         if self.heatmap_fails:

@@ -1,7 +1,9 @@
-"""GET /api/health and GET /api/models."""
+"""GET /api/health, GET /api/models and GET /api/models/insights."""
 from __future__ import annotations
 
 import csv
+import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -11,8 +13,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from .. import config
 from ..deps import get_model_service
 from ..model_service import ModelServiceProtocol
+from ..security import require_api_key
 
-router = APIRouter(prefix="/api", tags=["health"])
+log = logging.getLogger("brainscan.api")
+
+# /api/health is public (used by container health checks); the rest needs the API key when set.
+public_router = APIRouter(prefix="/api", tags=["health"])
+router = APIRouter(prefix="/api", tags=["models"], dependencies=[Depends(require_api_key)])
 
 # CSV column header keyword -> model id / display name
 _MODEL_COLUMNS = {"custom": "custom_cnn", "resnet": "resnet50"}
@@ -27,13 +34,17 @@ _METRIC_ROWS = {
 }
 
 
-@router.get("/health")
+@public_router.get("/health")
 def health(service: ModelServiceProtocol = Depends(get_model_service)) -> dict[str, Any]:
+    """Cheap: no model is loaded and TensorFlow is not imported to answer this."""
     return {
         "status": "ok",
         "model_loaded": service.is_loaded(),
         "model_version": config.MODEL_VERSIONS[config.DEFAULT_MODEL],
         "classes": config.CLASSES,
+        "models": service.status(),
+        "tensorflow_available": service.tensorflow_available(),
+        "demo": False,
     }
 
 
@@ -77,3 +88,18 @@ def models() -> dict[str, Any]:
         return {"models": read_model_metrics(config.METRICS_CSV)}
     except (ValueError, csv.Error):
         raise HTTPException(500, "Model comparison results file could not be read.") from None
+
+
+@router.get("/models/insights")
+def model_insights() -> dict[str, Any]:
+    """Verified evaluation numbers from ml/results/model_insights.json, else 'unavailable' (HTTP 200)."""
+    path = config.INSIGHTS_JSON
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("models"), list):
+                return data
+            log.warning("Insights file has an unexpected shape")
+        except (OSError, ValueError):
+            log.warning("Insights file could not be read")
+    return {"status": "unavailable", "models": []}

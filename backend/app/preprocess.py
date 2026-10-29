@@ -22,8 +22,6 @@ from PIL import Image, UnidentifiedImageError
 
 from . import config
 
-Image.MAX_IMAGE_PIXELS = config.MAX_IMAGE_PIXELS
-
 
 class ValidatedImage:
     """Result of a successful upload validation."""
@@ -49,7 +47,7 @@ def sanitize_filename(name: str | None) -> str:
 def validate_upload(filename: str | None, data: bytes) -> ValidatedImage:
     """Validate extension, size and real image content.
 
-    400 empty/corrupt, 413 too large, 415 wrong type.
+    400 empty/corrupt/too many pixels, 413 too large, 415 wrong type.
     """
     ext = Path(filename or "").suffix.lower()
     if ext not in config.ALLOWED_EXTENSIONS:
@@ -58,9 +56,18 @@ def validate_upload(filename: str | None, data: bytes) -> ValidatedImage:
         raise HTTPException(400, "The uploaded file is empty.")
     if len(data) > config.MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"File is too large. The maximum size is {config.MAX_UPLOAD_MB} MB.")
+    # Pillow only warns at MAX_IMAGE_PIXELS (errors at 2x), so check the header ourselves.
+    Image.MAX_IMAGE_PIXELS = config.MAX_IMAGE_PIXELS
     try:
         with Image.open(io.BytesIO(data)) as probe:
             fmt = probe.format
+            width, height = probe.size
+            if width * height > config.MAX_IMAGE_PIXELS:
+                raise HTTPException(
+                    400,
+                    f"The image has too many pixels ({width}x{height}). "
+                    f"The maximum is {config.MAX_IMAGE_PIXELS // 1_000_000} megapixels.",
+                )
             probe.verify()  # cheap integrity check; invalidates this handle
         image = Image.open(io.BytesIO(data))
         image.load()  # full decode catches truncated files

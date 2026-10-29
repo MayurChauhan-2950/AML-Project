@@ -1,27 +1,29 @@
-"""Analyze + analyses CRUD endpoints (see docs/API_CONTRACT.md)."""
+"""Analyze + analyses CRUD endpoints (see docs/API_CONTRACT.md, v1.1)."""
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from .. import config
 from ..deps import get_model_service, get_storage
+from ..errors import ModelUnavailableError
 from ..model_service import ModelServiceProtocol
 from ..preprocess import sanitize_filename, to_model_array, validate_upload
 from ..report import build_report_pdf
+from ..security import require_api_key
 from ..storage import Storage
 
 log = logging.getLogger("brainscan.api")
-router = APIRouter(prefix="/api", tags=["analyses"])
+router = APIRouter(prefix="/api", tags=["analyses"], dependencies=[Depends(require_api_key)])
 
 # Uploaded medical images must not be cached by browsers/proxies.
 _NO_STORE = {"Cache-Control": "private, no-store"}
 _MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+_ALLOWED_MODELS = (*config.MODEL_IDS, "both")
 
 
 # -- serialisation ---------------------------------------------------------
@@ -33,10 +35,15 @@ def _summary(rec: dict[str, Any]) -> dict[str, Any]:
         "predicted_class": rec["predicted_class"],
         "predicted_label": config.CLASS_LABELS.get(rec["predicted_class"], rec["predicted_class"]),
         "confidence": rec["confidence"],
+        "low_confidence": rec["low_confidence"],
+        "confidence_threshold": rec["confidence_threshold"],
+        "top2": rec["top2"],
+        "entropy": rec["entropy"],
+        "model_id": rec["model_id"],
     }
 
 
-def _full(rec: dict[str, Any], storage: Storage) -> dict[str, Any]:
+def _full(rec: dict[str, Any], storage: Storage, warning: str | None = None) -> dict[str, Any]:
     base = f"/api/analyses/{rec['id']}"
     data = _summary(rec)
     data.update(
@@ -44,6 +51,8 @@ def _full(rec: dict[str, Any], storage: Storage) -> dict[str, Any]:
         model_version=rec["model_version"],
         image_url=f"{base}/image",
         heatmap_url=f"{base}/heatmap" if storage.heatmap_path(rec) else None,
+        comparison=rec["comparison"],
+        warning=warning,
         disclaimer=config.DISCLAIMER,
     )
     return data
@@ -56,6 +65,11 @@ def _require(storage: Storage, analysis_id: str) -> dict[str, Any]:
     return rec
 
 
+def _compare_entry(probabilities: dict[str, float]) -> dict[str, Any]:
+    best = max(probabilities, key=lambda c: probabilities[c])
+    return {"predicted_class": best, "confidence": probabilities[best], "probabilities": probabilities}
+
+
 # -- analyze ---------------------------------------------------------------
 @router.post("/analyze")
 def analyze(
@@ -65,38 +79,70 @@ def analyze(
     storage: Storage = Depends(get_storage),
     service: ModelServiceProtocol = Depends(get_model_service),
 ) -> dict[str, Any]:
-    if model not in config.MODEL_PATHS:
-        raise HTTPException(400, f"Unknown model '{model}'. Use one of: {', '.join(config.MODEL_PATHS)}.")
+    if model not in _ALLOWED_MODELS:
+        raise HTTPException(400, f"Unknown model '{model}'. Use one of: {', '.join(_ALLOWED_MODELS)}.")
 
     # Read at most limit+1 bytes so a huge upload cannot exhaust memory.
     data = file.file.read(config.MAX_UPLOAD_BYTES + 1)
     validated = validate_upload(file.filename, data)
     array = to_model_array(validated.image)
 
-    probs = service.predict(array, model)  # may raise ModelUnavailableError -> 503
-    best = int(np.argmax(probs))
-    predicted = config.CLASSES[best]
-    probabilities = {cls: round(float(p), 6) for cls, p in zip(config.CLASSES, probs)}
+    wanted = list(config.MODEL_IDS) if model == "both" else [model]
+    results: dict[str, dict[str, float]] = {}
+    failures: dict[str, str] = {}
+    for name in wanted:  # one failing model must not take the other down
+        try:
+            probs = service.predict(array, name)
+            results[name] = {cls: round(float(p), 6) for cls, p in zip(config.CLASSES, probs)}
+        except ModelUnavailableError as exc:
+            failures[name] = str(exc)
+        except Exception:  # noqa: BLE001
+            log.exception("Prediction failed for model %s", name)
+            failures[name] = "Prediction failed."
+    if not results:
+        raise ModelUnavailableError(next(iter(failures.values())))
+
+    primary = next(name for name in wanted if name in results)  # resnet50 first
+    probabilities = results[primary]
+    predicted = max(probabilities, key=lambda c: probabilities[c])
+
+    warnings: list[str] = [f"Model '{n}' was not used: {msg}" for n, msg in failures.items()]
+    comparison: dict[str, Any] | None = None
+    if model == "both":
+        comparison = {
+            name: _compare_entry(results[name]) if name in results else None
+            for name in config.MODEL_IDS
+        }
+        comparison["agree"] = (
+            comparison["resnet50"]["predicted_class"] == comparison["custom_cnn"]["predicted_class"]
+            if len(results) == 2 else None
+        )
 
     heatmap_png: bytes | None = None
     if heatmap:
         try:
-            heatmap_png = service.heatmap(array, model, best)
+            heatmap_png = service.heatmap(array, primary, config.CLASSES.index(predicted))
         except Exception:  # noqa: BLE001 - heatmap is optional; the prediction still stands
-            log.exception("Grad-CAM failed for model %s", model)
+            log.exception("Grad-CAM failed for model %s", primary)
+            warnings.append("The Grad-CAM heatmap could not be generated.")
 
     rec = storage.create(
         filename=sanitize_filename(file.filename),
         predicted_class=predicted,
         confidence=probabilities[predicted],
         probabilities=probabilities,
-        model_version=config.MODEL_VERSIONS[model],
+        model_version=config.MODEL_VERSIONS[primary],
+        model_id=primary,
         image_bytes=data,
         image_ext=validated.extension,
         heatmap_png=heatmap_png,
+        comparison=comparison,
     )
-    log.info("analysis %s: %s (%.3f) via %s", rec["id"], predicted, rec["confidence"], model)
-    return _full(rec, storage)
+    log.info(
+        "analysis stored: class=%s confidence=%.3f model=%s%s", predicted, rec["confidence"],
+        primary, " (low confidence)" if rec["low_confidence"] else "",
+    )
+    return _full(rec, storage, warning=" ".join(warnings) or None)
 
 
 # -- list / get / delete ---------------------------------------------------
@@ -112,6 +158,18 @@ def list_analyses(
         raise HTTPException(400, f"Unknown label '{label}'. Use one of: {', '.join(config.CLASSES)}.")
     items, total = storage.list_analyses(search=search, label=label, page=page, page_size=page_size)
     return {"items": [_summary(r) for r in items], "total": total, "page": page, "page_size": page_size}
+
+
+@router.delete("/analyses")
+def purge_analyses(
+    confirm: bool = Query(False), storage: Storage = Depends(get_storage)
+) -> dict[str, Any]:
+    """Delete every analysis and file. Requires ``confirm=true``."""
+    if not confirm:
+        raise HTTPException(400, "This deletes ALL analyses. Repeat the request with confirm=true.")
+    deleted = storage.purge_all()
+    log.info("purged all analyses: %d removed", deleted)
+    return {"deleted": deleted}
 
 
 @router.get("/analyses/{analysis_id}")

@@ -18,18 +18,28 @@ The API starts and `/api/health` works even without TensorFlow. Models are loade
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/health` | `{status, model_loaded, model_version, classes}` |
+| GET | `/api/health` | `{status, model_loaded, model_version, classes, models:{<id>:{available, loaded}}, tensorflow_available, demo}`; public (no API key) |
 | GET | `/api/models` | `{models:[{id, name, accuracy, precision, recall, f1, parameters, trainable_parameters}]}` from `../model_comparison_results.csv`. Metrics are fractions (0.9 = 90%). |
-| POST | `/api/analyze?model=resnet50\|custom_cnn&heatmap=true\|false` | multipart field `file` (png/jpg/jpeg, max 10 MB) |
+| GET | `/api/models/insights` | verified evaluation numbers from `../ml/results/model_insights.json`; `{status:"unavailable", models:[]}` (HTTP 200) if the file is missing |
+| POST | `/api/analyze?model=resnet50\|custom_cnn\|both&heatmap=true\|false` | multipart field `file` (png/jpg/jpeg, max 10 MB). Adds `low_confidence`, `confidence_threshold`, `top2`, `entropy`, `model_id`, `comparison` (non-null only for `both`) |
 | GET | `/api/analyses?search=&label=&page=1&page_size=10` | newest first; `search` matches id, filename, class; `page_size` max 100 |
 | GET | `/api/analyses/{id}` | one analysis |
 | GET | `/api/analyses/{id}/image` | uploaded MRI |
 | GET | `/api/analyses/{id}/heatmap` | Grad-CAM PNG, 404 if none |
 | GET | `/api/analyses/{id}/report` | PDF report |
+| DELETE | `/api/analyses?confirm=true` | purges every record and file; without `confirm=true` it answers 400. Returns `{deleted: n}` |
 | DELETE | `/api/analyses/{id}` | removes the record and its files, returns `{deleted: true, id}` |
 | GET | `/api/stats` | `{total_scans, last_7_days, by_class, average_confidence}` |
 
 Errors are always `{"detail": "message"}`: 400 invalid/empty/corrupt file or bad parameter, 413 too large, 415 wrong type, 404 not found, 503 model unavailable. Validation checks the extension, the size, and that Pillow can really decode a PNG/JPEG (a renamed text file is rejected).
+
+## Configuration
+
+All settings are environment variables read in `app/config.py` (full list with defaults in `.env.example`). Notable ones: `CONFIDENCE_THRESHOLD` (default 0.6, below it `low_confidence` is true), `RETENTION_DAYS` (purge at startup, 0 = keep), `DATA_DIR`, `MODEL_DIR`, `API_KEY` (optional shared secret sent as `X-API-Key`), `RATE_LIMIT_PER_MIN`, `MAX_UPLOAD_MB`, `CORS_ORIGINS`, `LOG_FORMAT`. Analysis ids are `secrets.token_urlsafe(16)`. Run a single worker process (rate limiter and model cache are in memory).
+
+## Docker
+
+`docker build -t brainscan-backend backend` (see `Dockerfile`; the `.keras` models are mounted, not baked in; `../docker-compose.yml` wires this up). Not yet run by the author.
 
 ## Privacy
 
@@ -51,7 +61,10 @@ A `.keras` file is a zip; `config.json` inside was inspected.
 
 ```
 app/main.py          app factory, CORS (localhost:5173 / 127.0.0.1:5173)
-app/config.py        paths, limits, classes, disclaimer
+app/config.py        all settings (env vars), classes, disclaimer
+app/safety.py        low-confidence flag, top-2, entropy
+app/security.py      optional API key, rate limit, upload-size guard
+app/observability.py JSON logging + request-id middleware
 app/model_service.py lazy model loading + prediction
 app/preprocess.py    upload validation + preprocessing
 app/gradcam.py       Grad-CAM + overlay
