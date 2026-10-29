@@ -1,0 +1,19 @@
+/* Design tokens from the UI guide (Brain_Tumor_Detection_UI_Guide.pdf). Lead-owned. */
+:root {
+  --color-primary: #0B1220;      /* deep navy: sidebar, headings */
+  --color-accent: #2563EB;       /* blue: primary buttons, active nav */
+  --color-accent-hover: #1D4ED8;
+  --color-bg: #F8FAFC;           /* page background */
+  --color-card: #FFFFFF;
+  --color-border: #D7E0EA;
+  --color-text: #0B1220;
+  --color-muted: #5B6B7F;
+  --color-success: #15803D;
+  --color-warning: #B45309;
+  --color-danger: #B91C1C;
+  --radius-card: 16px;
+  --radius-control: 12px;
+  --shadow-card: 0 1px 2px rgba(11, 18, 32, 0.06), 0 4px 12px rgba(11, 18, 32, 0.04);
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --sidebar-width: 248px;
+}
