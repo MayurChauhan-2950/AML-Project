@@ -1,0 +1,7 @@
+Evaluation Metric,Custom CNN Baseline,ResNet50 Transfer Model
+Test Accuracy,74.31%,90.00%
+Macro Precision,75.81%,90.61%
+Macro Recall,74.31%,90.00%
+Macro F1-Score,70.55%,89.75%
+Total Parameters,"111,172","23,851,012"
+Trainable Parameters,"110,724","263,044"
